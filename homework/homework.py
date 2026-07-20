@@ -95,3 +95,310 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import gzip
+import json
+import os
+import pickle
+
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.svm import SVC
+
+
+# ------------------------------------------------------------------------------
+# Rutas
+# ------------------------------------------------------------------------------
+INPUT_TRAIN = "files/input/train_data.csv.zip"
+INPUT_TEST = "files/input/test_data.csv.zip"
+MODEL_PATH = "files/models/model.pkl.gz"
+METRICS_PATH = "files/output/metrics.json"
+
+CATEGORICAL_FEATURES = ["SEX", "EDUCATION", "MARRIAGE"]
+
+
+# ------------------------------------------------------------------------------
+# Limpieza
+# ------------------------------------------------------------------------------
+def clean_dataset(df):
+
+    df = df.copy()
+
+    df = df.rename(
+        columns={"default payment next month": "default"}
+    )
+
+    df = df.drop(columns=["ID"])
+
+    df = df.dropna()
+
+    df = df[
+        (df["EDUCATION"] != 0)
+        & (df["MARRIAGE"] != 0)
+    ]
+
+    df["EDUCATION"] = df["EDUCATION"].apply(
+        lambda x: 4 if x > 4 else x
+    )
+
+    return df
+
+
+def load_and_clean_data():
+
+    train_df = pd.read_csv(
+        INPUT_TRAIN,
+        compression="zip",
+    )
+
+    test_df = pd.read_csv(
+        INPUT_TEST,
+        compression="zip",
+    )
+
+    return (
+        clean_dataset(train_df),
+        clean_dataset(test_df),
+    )
+
+
+# ------------------------------------------------------------------------------
+# Split
+# ------------------------------------------------------------------------------
+def split_data(df):
+
+    X = df.drop(columns=["default"])
+    y = df["default"]
+
+    return X, y
+
+
+# ------------------------------------------------------------------------------
+# Pipeline
+# ------------------------------------------------------------------------------
+def make_pipeline(x_train):
+
+    numerical_features = [
+        col for col in x_train.columns
+        if col not in CATEGORICAL_FEATURES
+    ]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            (
+                "cat",
+                OneHotEncoder(handle_unknown="ignore"),
+                CATEGORICAL_FEATURES,
+            ),
+            (
+                "num",
+                StandardScaler(),
+                numerical_features,
+            ),
+        ]
+    )
+
+    pipeline = Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("pca", PCA()),
+            ("feature_selection", SelectKBest(score_func=f_classif)),
+            ("classifier", SVC()),
+        ]
+    )
+
+    return pipeline
+
+
+# ------------------------------------------------------------------------------
+# Grid Search
+# ------------------------------------------------------------------------------
+def make_grid_search(pipeline: Pipeline) -> GridSearchCV:
+
+    param_grid = {
+        "pca__n_components": [15, 20, None],
+        "feature_selection__k": [15, "all"],
+        "classifier__kernel": ["rbf"],
+     "classifier__C": [1, 10, 100],
+        "classifier__gamma": ["scale", "auto"],
+    }
+
+    grid_search = GridSearchCV(
+        estimator=pipeline,
+        param_grid=param_grid,
+        cv=10,
+        scoring="balanced_accuracy",
+        n_jobs=-1,
+        refit=True,
+    )
+
+    return grid_search
+
+
+# ------------------------------------------------------------------------------
+# Guardar modelo
+# ------------------------------------------------------------------------------
+def save_model(model):
+
+    os.makedirs(
+        os.path.dirname(MODEL_PATH),
+        exist_ok=True,
+    )
+
+    with gzip.open(
+        MODEL_PATH,
+        "wb",
+    ) as file:
+
+        pickle.dump(model, file)
+
+
+# ------------------------------------------------------------------------------
+# Métricas
+# ------------------------------------------------------------------------------
+def compute_metrics(dataset, y_true, y_pred):
+
+    return {
+
+        "type": "metrics",
+
+        "dataset": dataset,
+
+        "precision": precision_score(
+            y_true,
+            y_pred,
+            zero_division=0,
+        ),
+
+        "balanced_accuracy": balanced_accuracy_score(
+            y_true,
+            y_pred,
+        ),
+
+        "recall": recall_score(
+            y_true,
+            y_pred,
+            zero_division=0,
+        ),
+
+        "f1_score": f1_score(
+            y_true,
+            y_pred,
+            zero_division=0,
+        ),
+
+    }
+
+
+def compute_confusion_matrix(dataset, y_true, y_pred):
+
+    cm = confusion_matrix(
+        y_true,
+        y_pred,
+    )
+
+    return {
+
+        "type": "cm_matrix",
+
+        "dataset": dataset,
+
+        "true_0": {
+
+            "predicted_0": int(cm[0][0]),
+
+            "predicted_1": int(cm[0][1]),
+
+        },
+
+        "true_1": {
+
+            "predicted_0": int(cm[1][0]),
+
+            "predicted_1": int(cm[1][1]),
+
+        },
+
+    }
+
+
+def save_metrics(records):
+
+    os.makedirs(
+        os.path.dirname(METRICS_PATH),
+        exist_ok=True,
+    )
+
+    with open(
+        METRICS_PATH,
+        "w",
+        encoding="utf8",
+    ) as file:
+
+        for record in records:
+
+            file.write(
+                json.dumps(record) + "\n"
+            )
+
+
+# ------------------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------------------
+def main():
+
+    print("1. Iniciando")
+
+    train_df, test_df = load_and_clean_data()
+
+    print("2. Datos cargados")
+
+    x_train, y_train = split_data(train_df)
+    x_test, y_test = split_data(test_df)
+
+    print("3. Datos divididos")
+
+    pipeline = make_pipeline(x_train)
+
+    print("4. Pipeline creado")
+
+    model = make_grid_search(pipeline)
+
+    print("5. GridSearch creado")
+
+    model.fit(x_train, y_train)
+
+    print("6. Entrenamiento terminado")
+
+    print(model.best_params_)
+    print(model.best_score_)
+
+    save_model(model)
+
+    y_train_pred = model.predict(x_train)
+    y_test_pred = model.predict(x_test)
+
+    save_metrics(
+        [
+            compute_metrics("train", y_train, y_train_pred),
+            compute_metrics("test", y_test, y_test_pred),
+            compute_confusion_matrix("train", y_train, y_train_pred),
+            compute_confusion_matrix("test", y_test, y_test_pred),
+        ]
+    )
+
+
+if __name__ == "__main__":
+    main()
